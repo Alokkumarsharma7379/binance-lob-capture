@@ -1,0 +1,15 @@
+/build/
+/build-*/
+/binance-lob-capture-cloud/
+/output/
+*.csv
+*.exe
+*.o
+*.obj
+*.a
+*.lib
+*.so
+*.dll
+*.pdb
+.env
+/config/secrets.json

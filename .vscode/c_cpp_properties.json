@@ -1,0 +1,16 @@
+{
+    "configurations": [
+        {
+            "name": "Win32",
+            "compilerPath": "${env:USERPROFILE}/.codex/tools/binance-stage4b/ucrt64/bin/g++.exe",
+            "compileCommands": "${workspaceFolder}/build-stage4c-verify/compile_commands.json",
+            "cppStandard": "c++17",
+            "intelliSenseMode": "windows-gcc-x64",
+            "includePath": [
+                "${workspaceFolder}/src",
+                "${env:USERPROFILE}/.codex/tools/binance-stage4b/ucrt64/include"
+            ]
+        }
+    ],
+    "version": 4
+}
