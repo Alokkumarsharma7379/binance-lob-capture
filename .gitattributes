@@ -1,2 +1,4 @@
 tests/fixtures/stage4e_market.csv -text
 tests/fixtures/stage4e_expected_orderbook.csv -text
+samples/market_data_spot_BTCUSDT_2026-10-21.csv -text
+samples/market_data_spot_BTCUSDT_2026-10-21_orderbook.csv -text

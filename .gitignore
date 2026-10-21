@@ -6,6 +6,8 @@ __pycache__/
 *.csv
 !tests/fixtures/stage4e_market.csv
 !tests/fixtures/stage4e_expected_orderbook.csv
+!samples/market_data_spot_BTCUSDT_2026-10-21.csv
+!samples/market_data_spot_BTCUSDT_2026-10-21_orderbook.csv
 *.exe
 *.o
 *.obj
