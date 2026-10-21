@@ -1,0 +1,2 @@
+tests/fixtures/stage4e_market.csv -text
+tests/fixtures/stage4e_expected_orderbook.csv -text

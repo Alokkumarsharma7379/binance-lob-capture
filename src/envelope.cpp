@@ -5,6 +5,21 @@
 #include <stdexcept>
 
 namespace binance_capture {
+namespace {
+MarketEvent make_event(StreamKind kind, const std::string& symbol, const nlohmann::ordered_json& data) {
+    if (!data.is_object()) throw std::invalid_argument("expected an inner JSON object");
+    if (symbol != "BTCUSDT") throw std::invalid_argument("unsupported configured symbol: " + symbol);
+    if (data.contains("s") && (!data["s"].is_string() || data["s"] != symbol)) {
+        throw std::invalid_argument("payload symbol disagrees with configured stream");
+    }
+    return {kind, symbol, data.dump(), data};
+}
+}
+
+MarketEvent parse_market_payload(StreamKind kind, const std::string& symbol, const std::string& payload) {
+    (void)stream_kind_name(kind); // Control notices cannot occur in an audit row.
+    return make_event(kind, symbol, nlohmann::ordered_json::parse(payload, nullptr, false));
+}
 
 MarketEvent parse_envelope(const std::string& message, const std::string& symbol) {
     const auto envelope = nlohmann::ordered_json::parse(message, nullptr, false);
@@ -22,12 +37,7 @@ MarketEvent parse_envelope(const std::string& message, const std::string& symbol
     else if (name == "!serverShutdown") kind = StreamKind::server_shutdown;
     else throw std::invalid_argument("unexpected stream: " + name);
 
-    const auto& data = envelope["data"];
-    if (symbol != "BTCUSDT") throw std::invalid_argument("unsupported configured symbol: " + symbol);
-    if (data.contains("s") && (!data["s"].is_string() || data["s"] != symbol)) {
-        throw std::invalid_argument("payload symbol disagrees with configured stream");
-    }
-    return {kind, symbol, data.dump()};
+    return make_event(kind, symbol, envelope["data"]);
 }
 
 const char* stream_kind_name(StreamKind kind) {

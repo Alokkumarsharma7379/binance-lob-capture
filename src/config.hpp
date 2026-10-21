@@ -10,6 +10,7 @@ struct Config {
     std::string venue = "spot";
     std::string symbol = "BTCUSDT";
     std::string output_dir = "./output";
+    std::string replay_file;
     std::int64_t duration_seconds = 0; // Zero means no duration limit.
     bool show_help = false;
 };

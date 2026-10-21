@@ -2,6 +2,7 @@
 #include "config.hpp"
 #include "envelope.hpp"
 #include "market_data.hpp"
+#include "event_processing.hpp"
 
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/ip/tcp.hpp>
@@ -49,8 +50,8 @@ void validate_timer_duration(std::int64_t duration, SteadyClock::time_point now)
 
 class Session {
 public:
-    Session(std::int64_t duration_seconds, MarketDataCsv& csv)
-        : duration_seconds_(duration_seconds), csv_(csv) {
+    Session(std::int64_t duration_seconds, MarketDataCsv& csv, OrderBookCsv& book_csv)
+        : duration_seconds_(duration_seconds), csv_(csv), book_csv_(book_csv) {
         tls_.set_default_verify_paths();
         tls_.set_options(ssl::context::no_sslv2 | ssl::context::no_sslv3
                          | ssl::context::no_tlsv1 | ssl::context::no_tlsv1_1);
@@ -106,8 +107,15 @@ public:
             ++io_errors_;
             std::cerr << "CSV finalization error: " << error.what() << '\n';
         }
+        try {
+            book_csv_.close();
+        } catch (const std::exception& error) {
+            failed_ = true;
+            ++io_errors_;
+            std::cerr << "Book CSV finalization error: " << error.what() << '\n';
+        }
         const bool all_streams = counts_[0] > 0 && counts_[1] > 0 && counts_[2] > 0;
-        const bool success = requested_stop_ && websocket_ok_ && all_streams && !failed_;
+        const bool success = requested_stop_ && websocket_ok_ && all_streams && book_csv_.rows() > 0 && !failed_;
         print_summary();
         if (!all_streams) std::cerr << "Capture incomplete: not all three required streams were observed.\n";
         return success ? 0 : 1;
@@ -179,9 +187,22 @@ private:
                 return connection_error("Binance server shutdown notice", net::error::connection_aborted);
             }
             try {
-                csv_.write({last_receive_, conn_seq_}, event);
-            } catch (const std::exception& write_error) {
+                const auto decision = process_event({last_receive_, conn_seq_}, event,
+                                                     csv_, book_, book_csv_, book_counts_);
+                if (decision && (*decision == BookDecision::gap || *decision == BookDecision::coverage_lost
+                                 || *decision == BookDecision::crossed)) {
+                    std::cerr << "Book recovery: " << decision_name(*decision)
+                              << " conn_seq=" << conn_seq_ << '\n';
+                }
+            } catch (const std::ios_base::failure& write_error) {
                 return output_error(write_error.what());
+            } catch (const std::exception& book_error) {
+                book_.invalidate();
+                failed_ = true;
+                ++book_errors_;
+                stop_reason_ = "invalid or inconsistent book event";
+                std::cerr << "Book error at conn_seq=" << conn_seq_ << ": " << book_error.what() << '\n';
+                return finish();
             }
             const auto kind = event.kind;
             auto& count = counts_[static_cast<std::size_t>(kind)];
@@ -211,6 +232,7 @@ private:
             if (error || stopping_) return;
             try {
                 csv_.flush();
+                book_csv_.flush();
             } catch (const std::exception& flush_error) {
                 return output_error(flush_error.what());
             }
@@ -287,6 +309,7 @@ private:
 
     void finish() {
         if (finished_) return;
+        book_.invalidate();
         finished_ = true;
         stopping_ = true;
         resolver_.cancel();
@@ -314,6 +337,12 @@ private:
         std::cerr << "Summary: DNS=" << dns_ok_ << " TCP=" << tcp_ok_
                   << " TLS=" << tls_ok_ << " WebSocket=" << websocket_ok_ << '\n';
         print_counts();
+        std::cerr << "Book rows=" << book_csv_.rows();
+        for (std::size_t i = 0; i < book_counts_.size(); ++i) {
+            std::cerr << ' ' << decision_name(static_cast<BookDecision>(i)) << '=' << book_counts_[i];
+        }
+        std::cerr << " consistency_checks=" << book_.consistency_checks()
+                  << " book_errors=" << book_errors_ << '\n';
         std::cerr << "Parse errors=" << parse_errors_ << " connection errors=" << connection_errors_
                   << " I/O errors=" << io_errors_
                   << " TLS shutdown warnings=" << tls_shutdown_warnings_
@@ -331,6 +360,10 @@ private:
     net::signal_set signals_{io_, SIGINT, SIGTERM};
     std::int64_t duration_seconds_;
     MarketDataCsv& csv_;
+    OrderBookCsv& book_csv_;
+    OrderBook book_;
+    BookCounters book_counts_{};
+    std::uint64_t book_errors_ = 0;
     SteadyClock::time_point started_{};
     ReceiveTimestamp last_receive_{};
     std::array<std::uint64_t, 3> counts_{};
@@ -348,9 +381,15 @@ private:
 int run_capture(const Config& config) {
     validate_timer_duration(config.duration_seconds, SteadyClock::now());
     const auto path = market_data_path(config.output_dir, std::chrono::system_clock::now());
+    const auto book_path = order_book_path(path);
+    if (std::filesystem::exists(path) || std::filesystem::exists(book_path)) {
+        throw std::runtime_error("output CSV already exists; choose a fresh --output-dir");
+    }
     MarketDataCsv csv(path);
+    OrderBookCsv book_csv(book_path);
     std::cerr << "Market CSV: " << path.u8string() << '\n';
-    Session session(config.duration_seconds, csv);
+    std::cerr << "Order-book CSV: " << book_path.u8string() << '\n';
+    Session session(config.duration_seconds, csv, book_csv);
     return session.run();
 }
 

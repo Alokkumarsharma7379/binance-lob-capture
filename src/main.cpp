@@ -1,5 +1,6 @@
 #include "config.hpp"
 #include "session.hpp"
+#include "replay.hpp"
 
 #include <exception>
 #include <iostream>
@@ -13,6 +14,9 @@ int main(int argc, char* argv[]) {
             return 0;
         }
 
+        if (!config.replay_file.empty()) {
+            return binance_capture::run_replay(config.replay_file, config.output_dir);
+        }
         return binance_capture::run_capture(config);
     } catch (const std::invalid_argument& error) {
         std::cerr << "Argument error: " << error.what() << "\nUse --help for usage.\n";

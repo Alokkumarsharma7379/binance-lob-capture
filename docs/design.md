@@ -1,6 +1,6 @@
 # Proposed design: Binance capture and local order book
 
-Status: **Stage 4C market-data CSV implementation; validation recorded separately below**. Initial scope is Spot BTCUSDT, one symbol and connection, C++17/CMake, Asio/Beast/OpenSSL/nlohmann-json and ordered maps. The depth5/diff algorithm remains unimplemented and unverified; receiving the streams does not validate reconstruction. Live capture and both CSVs take priority over replay, USD-M and optimization. The deadline supplied by the user is October 22.
+Status: **Stage 4E offline reliability and replay implementation; validation is recorded in [stage4e-validation.md](stage4e-validation.md)**. Initial scope is Spot BTCUSDT, one symbol and connection, C++17/CMake, Asio/Beast/OpenSSL/nlohmann-json and ordered maps. The depth5/diff algorithm is implemented and exercised by deterministic tests. Its cross-stream revision assumption and reviewer acceptance remain conditional; successful capture alone does not prove full reconstruction correctness. Replay is now implemented; USD-M and optimization remain deferred. Current reported TLS verification failure is reserved for Stage 4F; Stage 4E makes no live-connectivity claim. The deadline supplied by the user is October 22.
 
 Inputs reviewed: [requirements.md](requirements.md) and all six pages of the original assignment, using the extraction reviewed against the rendered PDF in Stage 1. The requirements document is unchanged. Exchange and library references are linked beside the relevant claims. Recommendations below are project decisions, not extra requirements attributed to the PDF.
 
@@ -15,7 +15,7 @@ The sequence example explains Spot application logic; USD-M continuity uses an a
 
 ## B. Recommended scope and its correctness boundary
 
-Approved initial scope: **Spot BTCUSDT, one symbol per run, one combined WebSocket connection**, all three required subscriptions and both mandatory CSVs. Other instruments, offline replay and USD-M are deferred until working live capture and both outputs. Stage 4C adds the nine-column market CSV to Stage 4B reception; reconstruction and the book CSV remain later work.
+Approved initial scope: **Spot BTCUSDT, one symbol per run, one combined WebSocket connection**, all three required subscriptions and both mandatory CSVs. Other instruments and USD-M remain deferred. Stage 4E adds offline replay of the supported single-symbol audit schema. Stage 4D adds limited reconstruction and the 26-column CSV to the existing nine-column audit capture.
 
 Recommend a **limited top-five model anchored by fresh `depth5` snapshots**, with strict checks on how much of the price range is known. This is smaller than a REST snapshot/buffer/recovery implementation and makes replay self-contained from the nine-column audit CSV. It is not a full-depth synchronized order book.
 
@@ -32,7 +32,7 @@ This proposal omits multishard capture, a writer thread, plugin interfaces, an a
 | Language/toolchain | C++17, GCC 12, Linux reference build | Matches the PDF's example and keeps the required standard explicit. Windows/WSL may be used for development; Linux remains the submission validation target. |
 | Networking | Boost.Asio plus Boost.Beast, Boost headers 1.74+ | Stage 4B uses the `Boost::headers` imported target. These versions provide header-only Boost.System; no unused compiled Boost library is required. Windows also links Winsock libraries. No hand-written framing. |
 | TLS | OpenSSL 1.1.1+ through Asio SSL; supported OpenSSL 3 recommended | Stage 4B enforces certificate-chain and hostname verification, SNI and TLS 1.2+. OpenSSL default CA paths are used; `SSL_CERT_FILE` can select a trusted bundle for a portable installation. No insecure fallback. |
-| JSON | nlohmann/json 3.10+ discovered as an installed CMake package | Package discovery avoids configure-time downloads. Stage 4C parses the envelope once with `ordered_json`, checks stream/object/supplied symbol, and minifies the inner object, retaining key order, unknown fields and decimal strings. Full book/event decoding remains unimplemented. |
+| JSON | nlohmann/json 3.10+ discovered as an installed CMake package | Package discovery avoids configure-time downloads. Stage 4C parses the envelope once with `ordered_json`, checks stream/object/supplied symbol, and minifies the inner object, retaining key order, unknown fields and decimal strings. Stage 4D also retains the parsed inner DOM and decodes depth fields without reparsing the payload string. |
 | Build | CMake 3.16+, one application target and a focused envelope test executable; Ninja optional | Target-scoped C++17 and warnings, default Release, local dependencies, CTest for envelope/CLI checks. No generic build framework or configure-time download. |
 | Tests | CTest plus a small C++ test executable with explicit checks and failure exit codes | Avoid another runtime dependency. Checks must remain active in Release; do not rely on disabled `assert` expressions. |
 | CLI/logging/CSV | Small focused functions and standard streams | Few options and fixed schemas do not justify extra frameworks. CSV escaping and reading still require real quoted-field handling. |
@@ -41,47 +41,40 @@ The actual Windows build used GCC 16.2.0, CMake 4.4.4, Ninja 1.13.2, Boost 1.92.
 
 Beast supports synchronous and asynchronous operations. Its built-in WebSocket timeout mechanism requires asynchronous I/O, which is one reason to choose a single asynchronous event loop here. See [Beast timeouts](https://www.boost.org/doc/libs/latest/libs/beast/doc/html/beast/using_websocket/timeouts.html). Asio's TLS layer uses OpenSSL and provides peer/hostname verification; see [Asio SSL](https://www.boost.org/doc/libs/latest/doc/html/boost_asio/overview/ssl.html). JSON supports a namespaced CMake target; see [nlohmann/json CMake integration](https://json.nlohmann.me/integration/cmake/). Dependency discovery uses standard [CMake package discovery](https://cmake.org/cmake/help/latest/command/find_package.html).
 
-## D. Proposed files and responsibilities
-
-This is a planned tree, not a scaffold created during this stage:
+## D. Implemented files and responsibilities
 
 ```text
-binance-lob-capture/
-  CMakeLists.txt
-  README.md
-  .gitignore
-  docs/
-    requirements.md
-    design.md
-  src/
-    main.cpp
-    config.hpp / config.cpp
-    types.hpp
-    decimal.hpp / decimal.cpp
-    decoder.hpp / decoder.cpp
-    order_book.hpp / order_book.cpp
-    csv.hpp / csv.cpp
-    session.hpp / session.cpp
-    envelope.hpp / envelope.cpp  # inner payload extraction, not full book decoding
-    market_data.hpp / market_data.cpp # implemented market CSV and metadata helpers
-    replay.hpp / replay.cpp
-  tests/
-    tests.cpp
-    fixtures/
+src/
+  main.cpp                         # argument handling and capture entry point
+  config.hpp / config.cpp          # supported CLI options
+  session.hpp / session.cpp        # existing single-threaded network lifecycle
+  envelope.hpp / envelope.cpp      # stream classification, minified audit JSON, owned inner DOM
+  market_data.hpp / market_data.cpp # receive metadata and nine-column rows
+  csv_file.hpp / csv_file.cpp      # shared exclusive FILE ownership and checked writes
+  decimal.hpp / decimal.cpp       # checked decimal strings to int64 at scale 1e8
+  depth_event.hpp / depth_event.cpp # JSON fields to plain depth events
+  order_book.hpp / order_book.cpp  # maps, sequence/coverage policy, plain top-five arrays
+  order_book_csv.hpp / order_book_csv.cpp # 26-column rows and independent seqNo
+  event_processing.hpp / event_processing.cpp # audit wrapper and shared book-processing path
+  csv_reader.hpp / csv_reader.cpp # bounded quoted-field CSV reader
+  replay.hpp / replay.cpp       # validated audit rows to shared book processing, no networking
+tests/
+  envelope_tests.cpp
+  market_data_tests.cpp
+  decimal_tests.cpp
+  order_book_tests.cpp
+  replay_tests.cpp
+  replay_cli.cmake
+  fixtures/                    # source audit and independent expected book rows
+  validate_market_csv.py
+  validate_capture_pair.py
 ```
 
-| Module or type | Sole responsibility |
-| --- | --- |
-| `main` | Assemble ownership, choose live/replay, route one event through audit, book and output, print counters and exit status. This is the application coordinator; it need not become an extra class. |
-| `Config` and validation functions | Parse venue, one-symbol list, output directory, duration and replay options; reject unsupported combinations before connecting. |
-| Plain types in `types` | Timestamp, scaled price/quantity pair, event kind, depth event, event metadata, output row, counters and process outcome. Prefer ordinary structs and scoped enums, not inheritance. |
-| `decimal` functions | Exact string-to-scaled-integer conversion and range/precision checks. No networking or JSON knowledge. |
-| `decoder` functions | Validate envelope/stream identity, minify inner object, decode all needed fields and decimal pairs once. Return a complete validated event or an explicit error; never partially mutate the book. |
-| `OrderBook` | Own sorted levels, coverage boundaries, model update IDs and readiness state. Apply or reject events deterministically. Return an outcome: emit row, stale/drop, or wait for snapshot. No clocks, file handles or sockets. |
-| `MarketDataCsv` and metadata helpers | Implemented Stage 4C: own the one market file, exact header, RFC 4180 escaping, CRLF, write/flush/close checks, receive-time splitting, checked connection sequence. The future book writer is separate work; no two-file abstraction yet. |
-| `Session` | Stage 4B owns one io_context, DNS/socket/TLS/WebSocket/read buffer, phase/duration/cleanup/report timers and signal handling. Capture receive time before envelope parsing, print one intact sample per stream and report counters. The stack-owned private class lives until handlers drain; `run_capture` is the small public entry point. Epoch tracking and reconnect are later work. |
-| `envelope` functions | Stage 4C returns a `MarketEvent` with kind, configured symbol and owned minified inner JSON. Reject malformed/unexpected envelopes and mismatching supplied symbols; identify server notices without emitting market rows. Do not decode order-book fields. |
-| `replay` functions | Read saved market CSV with quoted-field support, reconstruct event metadata and use the same decoder/book/row-formatting path without creating a Session. |
+Plain structs live beside the component that uses them; no separate `types` module, replay placeholder, inheritance, or framework was needed. `OrderBook` has no networking, clocks, JSON, or file dependency. JSON shape/type/decimal validation happens in `depth_event`; full typed-message validation (including both sides, duplicates and snapshot order) happens before mutation in `OrderBook::apply`.
+
+`process_event` writes the audit before notifying the book of the connection epoch, then skips trade reconstruction or decodes/applies a depth event and emits the resulting row. Session owns the book and counters, holds references to the two writers, and preserves the existing asynchronous network lifecycle. `CsvFile` extracts Stage 4C's existing file code for reuse by both writers; it retains exclusive creation, buffered writes and checked flush/close. File failures use `std::ios_base::failure` during writes so Session distinguishes I/O failures from malformed or contradictory book events.
+
+The live connection epoch remains zero: automatic reconnect is not implemented. The shared processing path accepts epoch metadata; offline replay exercises resets across recorded connection generations.
 
 Ownership is RAII: files and sockets are owned objects whose destructors release resources. The coordinator and Session stay alive until outstanding handlers finish or are cancelled and drained. Buffers/JSON trees are never referenced after reuse; decoded events own the small data they retain. No worker queue stores references into the read buffer.
 
@@ -89,9 +82,9 @@ Ownership is RAII: files and sockets are owned objects whose destructors release
 
 Store integer price-to-quantity levels in two ordered maps: descending comparator for bids and ascending comparator for asks. `begin()` is the best known level. Store all levels inside the current certified price ranges, including a level that temporarily falls to sixth or lower after better levels are inserted. Do not erase such a level merely because only five are exported.
 
-Use a reusable vector of decoded update pairs for each side. Use fixed-size arrays of five price/quantity pairs for each exported snapshot. A map may contain more than five known levels; the CSV always has five slots per side.
+Use a per-message vector of decoded update pairs for each side; storage reuse is deferred. Use fixed-size arrays of five price/quantity pairs for each exported snapshot. A map may contain more than five known levels; the CSV always has five slots per side.
 
-For `k` updates and `N` retained levels, map changes cost `O(k log N)` and top-five extraction costs `O(5)` per side; a five-level reset is bounded work plus clearing old nodes. Memory is `O(N + k)`. Insertions allocate; quantity replacements normally do not.
+For `k` updates and `N` retained levels, map changes cost `O(k log N)` and top-five extraction costs `O(5)` per side; a five-level reset is bounded work plus clearing old nodes. Duplicate-price validation uses a temporary set, adding `O(k log k)` work; the full event path is therefore `O(k log k + k log N)`. Memory is `O(N + k)`. Insertions allocate; quantity replacements normally do not.
 
 | Alternative | Advantage | Why not the initial choice |
 | --- | --- | --- |
@@ -107,13 +100,12 @@ The PDF explicitly prefers `O(updates)` top-five work and asks candidates to exp
 ```mermaid
 flowchart LR
   B[Binance combined WebSocket] --> S[Session: complete message and receive time]
-  S --> D[Decoder: inner payload and typed event]
+  S --> D[Envelope: classify and retain inner JSON]
   D --> A[Market CSV: every routable payload]
-  A --> V[Validate event and sequence]
+  A --> V[Decode and validate full depth event]
   V --> O[OrderBook: apply or reject]
   O -->|committed diff or refresh| C[26-column book CSV]
   O -->|stale, gap, unknown depth| M[Counters and diagnostic]
-  R[Saved 9-column market CSV] --> D
 ```
 
 1. Finish a WebSocket message read; capture wall-clock time immediately, before JSON processing. Assign the connection-local sequence for that completed text message.
@@ -126,7 +118,7 @@ flowchart LR
 
 The audit represents receive/consumer order, not guaranteed total exchange chronology across subscriptions. A single connection does not make its three streams a transactionally synchronized bundle.
 
-## G. Proposed limited-book algorithm
+## G. Implemented limited-book algorithm and assumptions
 
 ### G1. What the model knows
 
@@ -134,12 +126,12 @@ The ready state stores:
 
 - `L`: exchange update ID of the last committed modeled state.
 - `H`: highest exchange depth ID observed from a valid depth message in this connection epoch, including a diff rejected for a gap or insufficient coverage.
-- `last_published_id`: exchange ID of the last exported state, retained during a recovery wait.
+- The implementation does not store a separate `last_published_id`: `H` is never below any published ID within the epoch and survives invalidation, so it already enforces that watermark.
 - `bid_floor`: fifth bid price in the last accepted complete depth5 anchor.
 - `ask_ceiling`: fifth ask price in that anchor.
 - All currently positive levels at bids `>= bid_floor` and asks `<= ask_ceiling`, not only the five exported slots.
 
-Those price intervals are complete in the anchor's visible book if the proposed anchor/sequence assumptions hold: any better price would have appeared ahead of its fifth level. Continuous absolute updates would preserve knowledge inside those intervals. They tell us nothing about unchanged prices outside them. The proposed algorithm ignores outside-range diff pairs for storage, but still validates every pair and advances sequence when the event is committed. This remains a design argument, not a tested implementation claim.
+Those price intervals are complete in the anchor's visible book if the proposed anchor/sequence assumptions hold: any better price would have appeared ahead of its fifth level. Continuous absolute updates would preserve knowledge inside those intervals. They tell us nothing about unchanged prices outside them. The proposed algorithm ignores outside-range diff pairs for storage, but still validates every pair and advances sequence when the event is committed. This coverage argument is exercised by hand-calculated fixtures, including a separate six-level reference fixture; those tests do not establish an exchange guarantee.
 
 We can export a complete top five after a diff only while both intervals contain at least five positive known levels. The proof depends on receiving a coherent depth5 anchor and all required subsequent diff coverage. This is a project invariant, not an extra Binance promise about cross-stream delivery order.
 
@@ -150,8 +142,8 @@ We can export a complete top five after a diff only while both intervals contain
 For Spot `depth5`, use `S = lastUpdateId`:
 
 1. Validate positive unique prices, positive snapshot quantities, at most five levels per side, correct ordering, and an uncrossed visible book. Never sort away conflicting duplicate entries or silently repair malformed data.
-2. Require `S >= max(H, last_published_id)` for a refresh. Lower IDs are stale relative to already seen/committed depth information: audit and count, without changing the book or emitting a row. Reset epoch-local IDs after a reconnect; do not compare revisions from different epochs as if continuity were known.
-3. If `S == L` and there is a ready book, compare the snapshot to its extracted top five. A contradiction is a fatal consistency error, not permission to overwrite newer quantities. A matching equal-ID snapshot is an applied refresh and emits one `P` row, even if unchanged.
+2. Require `S >= H` for a refresh (`H` includes all previously published IDs). Lower IDs are stale relative to already seen/committed depth information: audit and count, without changing the book or emitting a row. Reset epoch-local IDs after a reconnect; do not compare revisions from different epochs as if continuity were known.
+3. If `S == L` and there is a valid snapshot/book state (including a short snapshot), compare the snapshot to its extracted top five. A contradiction is a fatal consistency error, not permission to overwrite newer quantities. A matching equal-ID snapshot is an applied refresh and emits one `P` row, even if unchanged.
 4. For an accepted snapshot, replace both maps from the supplied levels together, reset coverage boundaries, set `L = S`, update `H`, and emit one `P` row. Discard previous deeper knowledge deliberately; never overlay old levels into this replacement.
 5. If both sides have five levels, enter `READY`. If either supplies fewer, emit the supplied snapshot with zero-padded unused slots and remain `WAIT_SNAPSHOT`: do not claim enough range information for later diff-based top-five reconstruction. A short snapshot is a representation of that payload, not an invented sixth level.
 
@@ -164,11 +156,11 @@ Validate `U <= u`. Advance `H` with valid event `u` even if the event will be dr
 | Condition | Decision |
 | --- | --- |
 | Not `READY` | Audit/count/drop the diff; await a qualifying snapshot. No buffer in this model. |
-| `u <= L` | Already covered/stale: do not apply and do not emit. |
+| `u <= L` | Already covered/stale: do not apply and do not emit. For `u == L` while ready, first compare all in-range changed quantities with current state. A contradiction is fatal; a successful nonempty comparison increments `consistency_checks`. |
 | `u > L` and `U > L + 1` | Uncovered sequence gap: invalidate maps, keep recovery watermarks and wait. |
 | `u > L` and `U <= L + 1 <= u` | Event covers the next required revision; apply all in-range pairs by setting absolute quantities or erasing zeros. |
 
-After a candidate update, both known ranges must still have at least five levels and best bid must be below best ask. Otherwise clear the candidate state, enter `WAIT_SNAPSHOT`, and emit no row for that uncommitted event. Do not emit the old book with the new event's metadata. A consistent candidate commits `L = u`, emits one `D` row, and advances `last_published_id`.
+After a candidate update, both known ranges must still have at least five levels and best bid must be below best ask. Otherwise clear the candidate state, enter `WAIT_SNAPSHOT`, and emit no row for that uncommitted event. Do not emit the old book with the new event's metadata. A consistent candidate commits `L = u` and emits one `D` row; `H` already includes that revision.
 
 Do not require every next `U` to be exactly `L+1` after a snapshot: a diff batch can overlap the snapshot revision. Covered earlier updates are harmless because pairs contain resulting quantities. Do not reorder future diffs to fill a gap; resnapshot instead. Duplicate/stale diffs do not generate duplicate book rows.
 
@@ -238,7 +230,7 @@ All policies in this section are proposed decisions needing approval, not change
 | Missing slots | Pad unused positions of a short depth5 payload with price 0 and size 0. Reserve zero price for unused slots; do not store a live zero-price/zero-size level. Never use padding to conceal an unknown sixth level after a diff. |
 | File lifecycle | Date-pattern filenames, UTC run-start date, one pair per run in the chosen output directory. Keep the same pair over midnight as a documented per-run convention. Refuse existing target files; no append or implicit overwrite. |
 | Encoding/escaping | UTF-8; comma-separated; quote fields containing comma/quote/CR/LF and double internal quotes. Use CRLF row endings consistently and locale-independent integer formatting without grouping separators. JSON remains a single minified line with string escapes. |
-| Buffering | Stage 4C formats one complete row and uses buffered `FILE` writes. Flush the header at creation, then schedule a flush every second and check flush/close after handlers drain. A blocked event loop can delay that timer. No per-row flush. Per-row strings still allocate; reuse/pooling is deferred. The future book writer should share the flush schedule. |
+| Buffering | Stage 4C formats one complete row and uses buffered `FILE` writes. Flush the header at creation, then schedule a flush every second and check flush/close after handlers drain. A blocked event loop can delay that timer. No per-row flush. Per-row strings still allocate; reuse/pooling is deferred. Both writers share this flush schedule and are independently finalized after handlers drain. |
 | I/O errors | Stop on write/flush/open failure with nonzero status; never continue producing unaudited book rows. Across two files there is no transactional crash guarantee. A failed run may have a longer audit prefix than book prefix. |
 
 The fixed scales are suitable only for supported values that fit their precision/range. Wider precision or per-symbol scales are a change to the policy, not silent rounding. Unexpected precision stops with a diagnostic instead of corrupting keys.
@@ -259,13 +251,13 @@ In an interview: `conn_seq` orders our received messages; `conn_epoch` separates
 
 | Situation | Proposed behavior |
 | --- | --- |
-| DNS/connect/network/WebSocket failure | Clear readiness immediately, retain already written output, retry with capped exponential backoff of 1, 2, 4, 8, 16, then 30 seconds. Reset the retry delay after a connection has been healthy for 30 seconds. |
+| DNS/connect/network/WebSocket failure | Current implementation stops with a nonzero exit and retains the written output. It never resumes that book on another connection. Automatic reconnect/backoff remains deferred. |
 | New connected epoch | Clear book, coverage and exchange-ID state; begin audit sequence at 1; wait for fresh depth5. Keep application `seqNo` and file handles. Replay performs the same reset when epoch changes. |
 | Sequence gap or lost depth coverage | Deterministic transition to `WAIT_SNAPSHOT`; no need to reconnect just to obtain the already subscribed partial snapshot. Keep auditing trades/diffs and count dropped book candidates. |
 | Valid envelope, invalid event fields | Audit the object, log the reason, stop the run. This strict initial policy avoids hidden reset behavior that cannot be recovered from the audit. A future continue-on-error policy requires tests and replayable reset rules. |
 | Unparseable JSON, wrong envelope, unexpected symbol/stream | Log/count and stop without fabricating an inner payload row. Such bytes cannot satisfy the required JSON column contract. Previously completed rows remain a prefix. |
 | Ping/pong and fragments | Let Beast assemble full messages and handle protocol control frames under its supported read flow; control frames are not market CSV events. Observe the venue's heartbeat requirements. |
-| Server shutdown/control notice | Do not invent a depth/trade payload. Trigger orderly reconnect; the next epoch resets book correctness. A reconnect request that fails does not generate fake market rows. |
+| Server shutdown/control notice | Do not invent a depth/trade payload. Stop with exit 1; automatic reconnect is deferred. |
 | TLS verification failure | Fatal diagnostic; do not disable verification or endlessly retry an invalid trust configuration. |
 | Disk error or allocation failure | Fatal; report nonzero status and partial-output limitation. |
 | SIGINT, SIGTERM, or duration expiry | Finish the current already-read event; stop scheduling market reads/retries, coordinate WebSocket close with outstanding operations, then TLS/socket teardown and flush/check files. Bound shutdown waiting to five seconds; force-close the socket if needed. Keep owners alive until cancellation handlers finish. |
@@ -274,11 +266,11 @@ Proposed limits, not Binance-prescribed constants: one symbol, one shard, three 
 
 Shutdown is orderly at normal storage speeds. A blocking filesystem call can delay a one-thread event loop; the five-second network-close deadline cannot preempt a kernel write that is already blocked. Do not claim hard real-time shutdown or crash-safe persistence.
 
-Counters: text messages, audited market rows, decoded kinds, committed diff rows, applied snapshot rows, stale diffs/snapshots, gaps, coverage losses, waits/drops, parse/schema errors, reconnects/failed attempts, I/O errors, and shutdown reason. Print start configuration and final counters to stderr; do not add columns to either CSV.
+Counters: text messages, audited market rows, processed stream kinds, committed diff rows, applied snapshot rows, stale diffs/snapshots, gaps, coverage losses, waits, consistency checks, parse/book errors, connection errors, I/O errors, and shutdown reason. Print start configuration and final counters to stderr; do not add columns to either CSV.
 
-**Current Stage 4C subset:** the recovery/resynchronization table above remains the later book design. The client stops with exit 1 on DNS/connect/handshake/read/envelope or CSV failure; it does not reconnect or resynchronize. Market rows use fixed shard 0 and epoch 0. Every completed text message consumes a checked uint64 sequence starting at 1; server notices consume a sequence but produce no market row and stop the run. Binary data is fatal. Exit 0 requires an intentional duration/signal stop after observing all three streams and successful CSV finalization. Only complete messages processed before the stop are counted. SIGINT/SIGTERM and Windows SIGBREAK share the shutdown path; cleanup has a five-second limit. Beast performs WebSocket/TLS teardown. If the peer returns normal WebSocket close code 1000 but omits TLS close_notify during intentional shutdown, report a separate warning. Do not suppress truncation during a live read or accept an unconfirmed close. This narrow cleanup policy was selected after an actual Binance run exhibited that behavior.
+**Current Stage 4E behavior:** book-gap/coverage recovery is implemented; network reconnect remains deferred. The client stops with exit 1 on DNS/connect/handshake/read/envelope or CSV failure; it does not reconnect. Session finalization now explicitly invalidates book readiness before closing the socket. Gaps and lost coverage resynchronize only through a sufficiently fresh subscribed depth5 snapshot. Market rows use fixed shard 0 and epoch 0. Every completed text message consumes a checked uint64 sequence starting at 1; server notices consume a sequence but produce no market row and stop the run. Binary data is fatal. Exit 0 requires an intentional duration/signal stop after observing all three streams, at least one emitted book row and successful finalization of both CSVs. Only complete messages processed before the stop are counted. SIGINT/SIGTERM and Windows SIGBREAK share the shutdown path; cleanup has a five-second limit. Beast performs WebSocket/TLS teardown. If the peer returns normal WebSocket close code 1000 but omits TLS close_notify during intentional shutdown, report a separate warning. Do not suppress truncation during a live read or accept an unconfirmed close. This narrow cleanup policy was selected after an actual Binance run exhibited that behavior.
 
-`run_capture` owns `MarketDataCsv` longer than Session. The CSV opens before networking and may remain header-only after setup failure. Directory creation is allowed; existing CSVs are atomically refused using `_wopen`/`open` with exclusive creation. The descriptor becomes a buffered binary `FILE`; no platform networking code changes or global environment changes are needed. Explicit checked close follows callback drainage; the destructor provides fallback cleanup. No append, midnight rotation or automatic retry with a different filename. Use another output directory for a second run on the same UTC date. Serialization retains string values and JSON values, not the outer envelope's whitespace or original numeric spelling. No price/quantity conversion occurs.
+`run_capture` owns `MarketDataCsv` longer than Session. The CSV opens before networking and may remain header-only after setup failure. Directory creation is allowed; existing CSVs are atomically refused using `_wopen`/`open` with exclusive creation. The descriptor becomes a buffered binary `FILE`; no platform networking code changes or global environment changes are needed. Explicit checked close follows callback drainage; the destructor provides fallback cleanup. No append, midnight rotation or automatic retry with a different filename. Use another output directory for a second run on the same UTC date. Serialization retains string values and JSON values, not the outer envelope's whitespace or original numeric spelling. Book prices/quantities use exact fixed-point conversion; audit decimal strings remain unchanged.
 
 ## K. One-thread execution and replay
 
@@ -294,7 +286,7 @@ Determinism target: same complete audit tape + same policy version yields byte-i
 
 ## L. Tests and implementation order
 
-The table below is the remaining implementation/test plan; it is not a claim that future book tests were run. Historical Stage 4B checks are in [stage4b-validation.md](stage4b-validation.md). Stage 4C CSV and live validation are recorded in [stage4c-validation.md](stage4c-validation.md); the market CSV subset of the plan is now implemented.
+The table below retains the implementation/test plan. Steps 1-5 have focused offline coverage now; network fault injection, automatic reconnect and Linux verification remain future work. Replay is implemented in Stage 4E. The Stage 4D record lists the checks actually run. Historical Stage 4B checks are in [stage4b-validation.md](stage4b-validation.md). Stage 4C CSV and live validation are recorded in [stage4c-validation.md](stage4c-validation.md); the market CSV subset of the plan is now implemented.
 
 | Order | Implement after approval | Important checks before moving on |
 | --- | --- | --- |
@@ -321,10 +313,37 @@ Live consistency checks cannot establish every missing guarantee of an exchange 
 | Complexity | Ordered maps, `O(k log N)` | Maps approved for the initial implementation; logarithmic trade-off remains explicit. |
 | Output policy | Receive timestamps, identical price/size scale 1e8, ID 1, D/P, no trade book rows, documented zero padding | User approval; precision compatibility for selected symbol. |
 | Recovery and malformed data | Reconnect resets; gap/unknown depth waits; malformed data stops with a reproducible prefix | User approval of strict failure behavior and diagnostics. |
-| Replay | Defer until live capture and both CSVs work | User-directed priority change; not implemented. |
+| Replay | Implemented in Stage 4E for the existing single-symbol audit schema | Offline fixture and saved-tape validation are recorded separately; no network calls. |
 | Files and duration | Refuse existing outputs; one pair per run; UTC start date; reviewer duration flag | User approval of lifecycle convention. |
 | Short snapshots | Output exact supplied levels with zero padding; wait before diff reconstruction | Validate expected behavior if the chosen symbol genuinely has fewer than five visible levels. |
 
 Interview explanation: the book is a deterministic function of ordered input. A snapshot establishes what prices are known, diffs update quantities only where continuity is established, and lost information triggers recovery instead of guessed output. Networking and file ownership remain separate from that state transition logic. Ordered maps make the ordering and deletion rules easy to inspect; their logarithmic cost is acknowledged.
 
-**Stage 4C boundary:** secure reception, inner JSON extraction, receive timestamps, connection sequence, samples/counters, buffered market CSV and shutdown are implemented. The validation record distinguishes actual Windows checks from remaining Linux verification. The existing isolated toolchain is reused; CMake downloads nothing. Decimal conversion, full book-field decoding, reconstruction, the book CSV, replay and reconnect/resynchronization remain unimplemented. Stage 4D requires further approval. The earlier request for `docs/concepts.md` remains deferred until the agreed concept coverage is completed or the user approves this combined document as its replacement.
+**Stage 4E boundary:** decimal conversion, typed depth decoding, limited coverage-aware reconstruction, the 26-column writer and deterministic tests are now implemented alongside Stage 4C capture. Validation distinguishes actual Windows checks from remaining Linux verification. The existing isolated toolchain is reused; CMake downloads nothing. Stage 4E adds replay and focused reliability corrections. REST synchronization, automatic reconnect, USD-M and benchmarking remain unimplemented. TLS troubleshooting, Linux validation and submission are outside this stage. The earlier request for `docs/concepts.md` remains deferred until the agreed concept coverage is completed or the user approves this combined document as its replacement.
+
+
+## N. Stage 4D implementation decisions
+
+- Full depth events are validated before map mutation. Semantic failure is audited, reported, and fatal in Session. A crossed differential candidate or coverage loss instead clears the maps, counts the recovery decision and waits for a qualifying snapshot. A crossed snapshot is malformed and fatal.
+- Snapshot replacement discards retained levels outside its new five, including previously known deeper prices. Matching equal-ID snapshots with valid stored state, including short snapshots, emit `P` rows; matching equal-ID diffs are counted as covered and emit none. The extra same-revision comparison can falsify a cross-stream assumption; it cannot prove every missing exchange guarantee.
+- At most 10,000 changes per side and 20,000 retained levels per side are accepted. Crossing the retained-level limit clears state and stops. The existing network limit is 1 MiB per message. Zero/nonpositive prices, negative quantities, duplicate price entries, malformed integer IDs and nonzero excess decimal precision are rejected.
+- Both output paths are checked before opening; each file is also created exclusively. A race or failure creating the second file can leave the first header-only file. The pair is not transactional. A checked buffered audit write precedes mutation, but it is not a per-row durable disk commit; a later flush failure still fails the run.
+- Counters name every successful depth decision: `applied_snapshot`, `applied_diff`, `stale_snapshot`, `stale_diff`, `waiting`, `gap`, `coverage_lost`, `crossed`. Contradictions/malformed payloads are separately fatal `book_errors`. A run needs all three streams, at least one book row, an intentional stop and successful finalization to exit zero. This is a capture-success criterion, not unconditional assignment acceptance.
+- Single-threaded processing preserves receive order and timestamps, including backward wall-clock movement. No exchange-time sorting, buffering, REST bootstrap, production replay, worker threads or performance claims were added.
+
+See [Stage 4D validation](stage4d-validation.md) for actual counts, suppression concerns, commands and remaining verification.
+
+
+## O. Stage 4E reliability and replay decisions
+
+Policy identifier: `limited-top5-v2`. The change from Stage 4D is that equal-revision comparisons also protect a previously accepted short snapshot. A short snapshot remains not ready for differential application, but its known values cannot silently change at the same update ID. Contradictions invalidate state and are fatal. Shared book processing also invalidates state on decoder/output exceptions, and Session invalidates it when finishing a connection. Neither change adds automatic reconnect.
+
+`--replay INPUT.csv --output-dir DIRECTORY` selects replay before any Session or TLS context is constructed. It writes `DIRECTORY/<input-stem>_orderbook.csv` exclusively, does not rewrite the audit, and rejects `--duration`. Supported venue/symbol flags retain their normal validation. Replay reads physical record order without sleeping or consulting a clock. `conn_seq` must be positive and strictly increase within an epoch; gaps are allowed. Epochs must not decrease, and an increase resets book state even if its first row is a trade. Initial/nonconsecutive epoch values are allowed because a saved tape may omit header-only connections. Exchange IDs need not match these counters. Book `seqNo` starts at 1 and continues across epochs.
+
+The CSV reader supports quoted fields, doubled quotes, embedded CR/LF inside quoted fields, CRLF or LF record endings, and a final record without a newline. Bare CR outside quotes, NUL, unterminated/misplaced quotes, trailing bytes after a closing quote, more than nine fields, bad headers/types/ranges, non-minified/non-object JSON, and unsupported metadata are rejected. Each raw logical record is limited to `2 * 1024 * 1024 + 4096` bytes to accommodate quote expansion of a 1 MiB WebSocket event plus metadata. It holds one record at a time, never the whole input. Replay is limited to Spot BTCUSDT, shard 0.
+
+A valid header-only file is a valid empty replay and emits a header-only book file with exit 0. Replay success means complete validated input processing and checked output finalization; it does not require all streams or any book rows, unlike live-capture success. Failure returns exit 1 with a logical CSV record number, preserves the prior book prefix, and checks output close. Invalid CLI combinations return 2. Output is not transactional or crash-durable. A malformed input can leave a header-only or partial book file; choose a new output directory for another attempt.
+
+`process_event` still writes the live audit before mutation; replay calls the extracted `process_book_event` because its audit already exists. The book/formatter and rejection decisions are shared. No parser, map or networking redesign was needed. The fixture's expected CSV is independent of the implementation, and `.gitattributes` preserves its CRLF bytes across Git checkouts.
+
+Determinism is defined for the same input and policy version. An old tape containing a short-snapshot contradiction previously accepted by Stage 4D will now fail explicitly. This is an intentional correctness fix, not a promise of identical behavior across policy changes. Actual byte comparisons, compiler diagnostics and the unverified transport/signal paths are recorded in [Stage 4E validation](stage4e-validation.md).

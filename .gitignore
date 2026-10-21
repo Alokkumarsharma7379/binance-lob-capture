@@ -2,7 +2,10 @@
 /build-*/
 /binance-lob-capture-cloud/
 /output/
+__pycache__/
 *.csv
+!tests/fixtures/stage4e_market.csv
+!tests/fixtures/stage4e_expected_orderbook.csv
 *.exe
 *.o
 *.obj
@@ -13,3 +16,4 @@
 *.pdb
 .env
 /config/secrets.json
+/output-*/

@@ -44,7 +44,7 @@ Config parse_arguments(int argc, char* argv[]) {
         }
 
         if (option != "--help" && option != "--venue" && option != "--symbols"
-            && option != "--output-dir" && option != "--duration") {
+            && option != "--output-dir" && option != "--duration" && option != "--replay") {
             throw std::invalid_argument("unknown argument: " + option);
         }
         if (!seen_options.insert(option).second) {
@@ -77,9 +77,14 @@ Config parse_arguments(int argc, char* argv[]) {
             config.output_dir = value;
         } else if (option == "--duration") {
             config.duration_seconds = parse_duration(value);
+        } else if (option == "--replay") {
+            config.replay_file = value;
         }
     }
 
+    if (!config.replay_file.empty() && seen_options.count("--duration")) {
+        throw std::invalid_argument("--duration cannot be used with --replay");
+    }
     return config;
 }
 
@@ -87,18 +92,19 @@ void print_help(std::ostream& output) {
     output
         << "Usage: binance_capture [options]\n"
         << "\n"
-        << "Stage 4C: capture Binance Spot BTCUSDT messages to a nine-column market CSV.\n"
+        << "Stage 4E: capture Spot BTCUSDT or replay a saved market CSV entirely offline.\n"
         << "\n"
         << "Options:\n"
         << "  --help, -h           Show this help\n"
         << "  --venue spot         Venue (default: spot; only spot is accepted)\n"
         << "  --symbols BTCUSDT    Instrument (default: BTCUSDT; only BTCUSDT is accepted)\n"
         << "  --output-dir PATH    Capture directory (default: ./output; existing files refused)\n"
+        << "  --replay CSV         Regenerate the book CSV from a saved market CSV; no network\n"
         << "  --duration SECONDS   Positive integer within timer range; omitted means until stopped\n"
         << "\n"
         << "Use separate option and value arguments; duplicate options are errors.\n"
-        << "Exit codes: 0 = help or requested stop after receiving all three streams,\n"
-        << "            1 = failed/incomplete capture, 2 = invalid arguments.\n";
+        << "Exit codes: 0 = help or requested stop with all streams and finalized book rows,\n"
+        << "            or a complete valid replay; 1 = failure, 2 = invalid arguments.\n";
 }
 
 } // namespace binance_capture

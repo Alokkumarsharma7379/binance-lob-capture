@@ -1,17 +1,8 @@
 #include "market_data.hpp"
 
-#include <cerrno>
 #include <ctime>
-#include <fcntl.h>
 #include <limits>
 #include <stdexcept>
-#include <system_error>
-#ifdef _WIN32
-#include <io.h>
-#include <sys/stat.h>
-#else
-#include <unistd.h>
-#endif
 
 namespace binance_capture {
 
@@ -53,7 +44,8 @@ std::string format_market_row(const EventMetadata& metadata, const MarketEvent& 
     }
     return std::to_string(metadata.received.seconds) + ','
         + std::to_string(metadata.received.nanoseconds) + ",spot,"
-        + stream_kind_name(event.kind) + ",0,0," + std::to_string(metadata.conn_seq) + ','
+        + stream_kind_name(event.kind) + ",0," + std::to_string(metadata.conn_epoch)
+        + "," + std::to_string(metadata.conn_seq) + ','
         + csv_escape(event.symbol) + ',' + csv_escape(event.payload_json) + "\r\n";
 }
 
@@ -68,79 +60,14 @@ std::filesystem::path market_data_path(const std::filesystem::path& directory,
     return directory / (std::string("market_data_spot_BTCUSDT_") + date + ".csv");
 }
 
-void write_csv_bytes(std::FILE* file, const std::string& bytes) {
-    if (std::fwrite(bytes.data(), 1, bytes.size(), file) != bytes.size() || std::ferror(file)) {
-        throw std::runtime_error("CSV write failed");
-    }
-}
-
-void flush_csv_file(std::FILE* file) {
-    if (std::fflush(file) != 0 || std::ferror(file)) {
-        throw std::runtime_error("CSV flush failed");
-    }
-}
-
-MarketDataCsv::MarketDataCsv(const std::filesystem::path& path) {
-    if (!path.parent_path().empty()) std::filesystem::create_directories(path.parent_path());
-    // C++17 streams lack exclusive creation. Only this boundary uses platform file APIs.
-#ifdef _WIN32
-    const int descriptor = _wopen(path.c_str(), _O_WRONLY | _O_CREAT | _O_EXCL | _O_BINARY,
-                                 _S_IREAD | _S_IWRITE);
-#else
-    const int descriptor = ::open(path.c_str(), O_WRONLY | O_CREAT | O_EXCL, 0666);
-#endif
-    if (descriptor < 0) {
-        throw std::system_error(errno, std::generic_category(), "creating CSV " + path.u8string());
-    }
-#ifdef _WIN32
-    file_ = _fdopen(descriptor, "wb");
-#else
-    file_ = ::fdopen(descriptor, "wb");
-#endif
-    if (!file_) {
-        const int saved_error = errno;
-#ifdef _WIN32
-        _close(descriptor);
-#else
-        ::close(descriptor);
-#endif
-        throw std::system_error(saved_error, std::generic_category(), "opening CSV stream");
-    }
-    try {
-        write_csv_bytes(file_, std::string(market_header) + "\r\n");
-        flush();
-    } catch (...) {
-        std::fclose(file_);
-        file_ = nullptr;
-        throw;
-    }
-}
-
-MarketDataCsv::~MarketDataCsv() {
-    if (file_) std::fclose(file_); // Normal execution uses checked close().
-}
+MarketDataCsv::MarketDataCsv(const std::filesystem::path& path) : file_(path, market_header) {}
 
 void MarketDataCsv::write(const EventMetadata& metadata, const MarketEvent& event) {
-    if (!file_) throw std::runtime_error("cannot write a closed CSV");
     if (rows_ == std::numeric_limits<std::uint64_t>::max()) {
         throw std::overflow_error("CSV row counter exhausted");
     }
-    write_csv_bytes(file_, format_market_row(metadata, event));
+    file_.write(format_market_row(metadata, event));
     ++rows_;
-}
-
-void MarketDataCsv::flush() {
-    if (!file_) throw std::runtime_error("cannot flush a closed CSV");
-    flush_csv_file(file_);
-}
-
-void MarketDataCsv::close() {
-    if (!file_) return;
-    auto* file = file_;
-    file_ = nullptr;
-    const bool flush_failed = std::fflush(file) != 0 || std::ferror(file);
-    const bool close_failed = std::fclose(file) != 0;
-    if (flush_failed || close_failed) throw std::runtime_error("CSV flush/close failed");
 }
 
 } // namespace binance_capture
