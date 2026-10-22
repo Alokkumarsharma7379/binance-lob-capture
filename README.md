@@ -16,18 +16,35 @@ The application subscribes to differential depth, depth5 snapshots and individua
 ## Architecture and data flow
 
 ```text
+Live capture:
 Binance combined WebSocket
-    |
-Session -> envelope parsing -> market-data audit CSV
-                                   |
-                          shared event processing
-                                   |
-                          depth decoding / scaling
-                                   |
-                              local book -> order-book CSV
+           |
+        Session
+           |
+    envelope parsing
+           |
+  shared event processing
+      /             \
+     /               \
+market-data audit   depth decoding / scaling
+      CSV                    |
+                              |
+                          local book
+                              |
+                        order-book CSV
 
-Recorded market CSV -> CSV reader / replay -> shared event processing
-```
+Offline replay:
+Recorded market CSV
+           |
+   CSV reader / replay
+           |
+  shared event processing
+           |
+   depth decoding / scaling
+           |
+       local book
+           |
+    order-book CSV
 
 Trades are audited without applying execution quantities to the book. Every successfully applied depth event emits a book row, even if the visible top five is unchanged. Epoch resets also apply to recorded trade events, as described below.
 
