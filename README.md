@@ -15,45 +15,19 @@ The application subscribes to differential depth, depth5 snapshots and individua
 
 ## Architecture and data flow
 
+```text
+Binance combined WebSocket
+    |
+Session -> envelope parsing -> market-data audit CSV
+                                   |
+                          shared event processing
+                                   |
+                          depth decoding / scaling
+                                   |
+                              local book -> order-book CSV
 
-## Architecture and Data Flow
-
-```mermaid
-flowchart TD
-    subgraph LIVE["Live Market Data Capture"]
-        A["Binance Combined WebSocket"]
-        B["Boost.Beast / Asio Session"]
-        C["Envelope Parsing"]
-        D["Market Data CSV"]
-
-        A --> B --> C --> D
-    end
-
-    subgraph REPLAY["Offline Replay"]
-        E["Recorded Market Data CSV"]
-        F["CSV Reader & Payload Parsing"]
-
-        E --> F
-    end
-
-    D --> G["Shared Event Processing"]
-    F --> G
-
-    G --> H{"Event Type"}
-
-    H -->|Trade| I["No Book Update"]
-    H -->|Depth / Depth5| J["Depth Decoding & Fixed-Point Scaling"]
-
-    J --> K["Local Order Book"]
-    K --> L["Sequence & Coverage Validation"]
-    L --> M{"Update Applied?"}
-
-    M -->|Yes| N["Top-5 Order Book CSV"]
-    M -->|No| O["No Book Row"]
+Recorded market CSV -> CSV reader / replay -> shared event processing
 ```
-
-Market events are recorded before order-book processing during live capture. Both live capture and offline replay use the same book reconstruction logic. Trades do not modify the book, and only successfully applied depth events produce order-book rows.
-
 
 Trades are audited without applying execution quantities to the book. Every successfully applied depth event emits a book row, even if the visible top five is unchanged. Epoch resets also apply to recorded trade events, as described below.
 
