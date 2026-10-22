@@ -1,49 +1,94 @@
-# Binance market-data capture and local order book
+# Binance Market Data Capture and Local Order Book
 
-C++17 application for Binance Spot **BTCUSDT**, using one combined WebSocket connection. It writes a nine-column market-data audit CSV and a 26-column top-five order-book CSV. Offline replay regenerates the book CSV without network calls.
+A C++17 application for the iRage Software Developer Internship assignment. It captures Binance Spot **BTCUSDT** through one combined WebSocket connection and produces two CSV files: a market-event audit and the reconstructed top five bids and asks.
 
-The book is a limited model anchored by depth5 snapshots. It pauses differential output when continuity or known depth is lost. Full-depth REST synchronization, automatic reconnect, USD-M and multiple symbols are not implemented.
+The application subscribes to differential depth, depth5 snapshots and individual trades. Its local book uses a limited-depth model anchored by depth5 snapshots. Deterministic offline replay regenerates the order-book CSV from the saved audit **without network calls**.
 
-## Build
+## Key features
 
-Dependencies: CMake 3.16+, a C++17 compiler, Boost headers 1.74+, OpenSSL development libraries 1.1.1+ (OpenSSL 3 recommended), and nlohmann/json 3.10+. CMake discovers installed packages and downloads nothing. Warning flags are enabled on each target.
+- **Asynchronous networking:** Boost.Asio/Beast handles connection setup, complete-message reads, ping/pong, timers and shutdown on one event loop.
+- **Verified TLS:** OpenSSL certificate-chain and hostname verification, SNI and a TLS 1.2 minimum.
+- **Auditable processing:** recognized market events are written before book mutation, including stale and unapplied depth events.
+- **Exact decimals:** checked price and quantity conversion to scaled `int64_t`, without floating-point arithmetic.
+- **Explicit book state:** ordered levels, absolute quantity updates, zero deletion, revision checks and snapshot recovery after lost continuity or depth coverage.
+- **Reproducible CSVs:** fixed schemas, RFC 4180-style escaping, checked file finalization and shared live/replay book logic.
 
-| Tested environment | Tools | Result |
-| --- | --- | --- |
-| Windows x64, isolated MSYS2 UCRT64 packages | GCC 16.2.0, CMake 4.4.4, Ninja 1.13.2, Boost 1.92.0, OpenSSL 3.6.5, JSON 3.12.0 | Clean Release build; 8/8 CTest tests passed. |
-| Ubuntu 26.04.1 under WSL2 | GCC 15.2.0, CMake 4.2.3, GNU Make 4.4.1, Boost 1.90.0, OpenSSL 3.5.5, JSON 3.11.3 | Clean Release build; 8/8 CTest tests passed. |
+## Architecture and data flow
 
-Live TLS/WebSocket capture was verified on Windows; Linux verification covers compilation, offline tests and replay.
+```text
+Binance combined WebSocket
+    |
+Session -> envelope parsing -> market-data audit CSV
+                                   |
+                          shared event processing
+                                   |
+                          depth decoding / scaling
+                                   |
+                              local book -> order-book CSV
 
-GCC 12 is the assignment's example compiler, but it is not available in the configured Ubuntu repositories and has not been tested. No Clang result is claimed.
+Recorded market CSV -> CSV reader / replay -> shared event processing
+```
 
-### Linux / WSL2
+Trades are audited without applying execution quantities to the book. Every successfully applied depth event emits a book row, even if the visible top five is unchanged. Epoch resets also apply to recorded trade events, as described below.
 
-The following dependencies were installed from Ubuntu's official repositories:
+| Modules under `src/` | Responsibility |
+| --- | --- |
+| [main.cpp](src/main.cpp), [config.cpp](src/config.cpp) | Validate CLI options and select live capture or replay. |
+| [session.cpp](src/session.cpp), [envelope.cpp](src/envelope.cpp) | Own network operations, timestamp complete reads, classify streams and parse inner JSON. |
+| [market_data.cpp](src/market_data.cpp), [csv_file.cpp](src/csv_file.cpp) | Serialize the audit; own exclusively created, buffered CSV files. |
+| [event_processing.cpp](src/event_processing.cpp) | Coordinate audit-before-mutation and shared book processing. |
+| [depth_event.cpp](src/depth_event.cpp), [decimal.cpp](src/decimal.cpp) | Validate depth fields and convert decimal strings. |
+| [order_book.cpp](src/order_book.cpp), [order_book_csv.cpp](src/order_book_csv.cpp) | Maintain levels, enforce sequence/coverage rules and serialize the top five. |
+| [csv_reader.cpp](src/csv_reader.cpp), [replay.cpp](src/replay.cpp) | Validate recorded CSV events and replay them offline. |
+
+One thread preserves processing order and keeps ownership straightforward. Parsing, map updates and buffered `FILE` writes execute in the event handlers. Files flush every second and on checked close. Slow storage can delay networking and timers; there is no writer thread or transaction across the two outputs.
+
+## Build and dependencies
+
+Requires a C++17 compiler, **CMake 3.16+**, **Boost headers 1.74+**, **OpenSSL development libraries 1.1.1+** and **nlohmann/json 3.10+**. OpenSSL 3 is recommended. CMake discovers installed dependencies and downloads nothing. GCC builds enable `-Wall -Wextra -Wpedantic` on application and test targets.
+
+| Verified environment | Compiler and build tools | Libraries | Release result |
+| --- | --- | --- | --- |
+| Windows x64, isolated UCRT64 | GCC 16.2.0, CMake 4.4.4, Ninja 1.13.2 | Boost 1.92.0, OpenSSL 3.6.5, JSON 3.12.0 | Clean build; 8/8 CTest tests passed. |
+| Ubuntu 26.04.1 / WSL2, x86_64 | GCC 15.2.0, CMake 4.2.3, GNU Make 4.4.1 | Boost 1.90.0, OpenSSL 3.5.5, JSON 3.11.3 | Clean build; 8/8 CTest tests passed. |
+
+Live capture was verified on Windows. Linux validation covers compilation, offline tests and replay. GCC 12, used in the assignment's example, and Clang have not been verified. Run commands from the repository root.
+
+### Ubuntu / WSL
+
+Install dependencies from Ubuntu's repositories, then configure and build:
 
 ```sh
 sudo apt-get update
 sudo apt-get install -y --no-install-recommends g++ cmake make libboost-dev libssl-dev nlohmann-json3-dev ca-certificates
+
 cmake -S . -B build-linux -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER=g++ -DBUILD_TESTING=ON
 cmake --build build-linux --parallel 2
 ctest --test-dir build-linux --output-on-failure
 ```
 
-### Windows PowerShell
+### Windows / PowerShell
 
-These commands use the existing isolated UCRT64 installation. Set `$capturePrefix` to your compatible installation; compilers, libraries and runtime DLLs must use the same architecture/toolchain. Dependencies are outside this repository. The path below is a local setup example, not a required installation location.
+Use an existing x64 UCRT64 environment containing GCC, CMake, Ninja, Boost, OpenSSL and nlohmann/json. Compiler, libraries and runtime DLLs must belong to the same toolchain. Set `$capturePrefix` to its `ucrt64` directory; the example location is configurable.
 
 ```powershell
-$capturePrefix = "$env:USERPROFILE\.codex\tools\binance-stage4b\ucrt64"
+$capturePrefix = 'C:\msys64\ucrt64' # Change to your existing UCRT64 directory.
 $env:PATH = "$capturePrefix\bin;$env:PATH"
-& "$capturePrefix\bin\cmake.exe" -S . -B build-windows -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON -DCMAKE_EXPORT_COMPILE_COMMANDS=ON "-DCMAKE_CXX_COMPILER=$capturePrefix/bin/g++.exe" "-DCMAKE_MAKE_PROGRAM=$capturePrefix/bin/ninja.exe" "-DCMAKE_PREFIX_PATH=$capturePrefix"
+
+& "$capturePrefix\bin\cmake.exe" -S . -B build-windows -G Ninja `
+  -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON -DCMAKE_EXPORT_COMPILE_COMMANDS=ON `
+  "-DCMAKE_CXX_COMPILER=$capturePrefix/bin/g++.exe" `
+  "-DCMAKE_MAKE_PROGRAM=$capturePrefix/bin/ninja.exe" `
+  "-DCMAKE_PREFIX_PATH=$capturePrefix"
 & "$capturePrefix\bin\cmake.exe" --build build-windows --parallel 2
 & "$capturePrefix\bin\ctest.exe" --test-dir build-windows --output-on-failure
 ```
 
-Changes to `$env:PATH` affect that PowerShell process and its children, not the system configuration. The optional VS Code configuration points to this local toolchain and `build-windows/compile_commands.json`; adapt it to your installation. It does not control CMake builds.
+The tested setup used isolated UCRT64 packages outside this repository. The `PATH` change affects only this PowerShell session and its children. The optional `.vscode` configuration contains local editor paths; adapt them to your installation. It does not control CMake.
 
-## Run live capture
+## Run the application
+
+### Live capture
 
 Linux:
 
@@ -51,128 +96,176 @@ Linux:
 ./build-linux/binance_capture --venue spot --symbols BTCUSDT --output-dir ./output/live-run --duration 60
 ```
 
-Windows, after setting the toolchain PATH above:
+Windows, after setting the toolchain `PATH`:
 
 ```powershell
-$env:SSL_CERT_FILE = "$env:USERPROFILE\.codex\tools\binance-stage4b\ca-bundle.crt"
+$env:SSL_CERT_FILE = 'C:\path\to\trusted-ca-bundle.crt' # Existing trusted PEM bundle.
 .\build-windows\binance_capture.exe --venue spot --symbols BTCUSDT --output-dir ./output/live-run --duration 60
 ```
 
-`SSL_CERT_FILE` must identify an existing trusted PEM CA bundle. The tested portable installation has empty default CA files; the explicitly selected bundle was copied from the existing Git for Windows installation and contains 150 CA certificates. Its provenance and verified hash are in [the TLS investigation](docs/stage4f-phase1-2.md). No CA bundle is shipped in this repository. Linux normally uses its installed OpenSSL trust store. Certificate-chain verification, hostname verification, SNI and TLS 1.2+ remain enabled; there is no insecure fallback.
+The tested portable Windows installation had empty default CA files and required `SSL_CERT_FILE` to select a trusted PEM bundle. The successful run used an existing Git for Windows bundle containing 150 certificates; [the TLS investigation](docs/stage4f-phase1-2.md) records its provenance and hash. No bundle is shipped here. Linux normally uses its installed OpenSSL trust store. Verification remains enabled; there is no insecure fallback.
 
-Use a fresh output directory for each run. Duration includes connection setup; omit it to run until interrupted or an error occurs. `--duration 300` is accepted for the assignment's reviewer invocation, but a successful 300-second run has not been demonstrated.
+Use a fresh output directory for each run. Missing directories are created; existing target CSVs are refused. Duration includes connection setup; omit it to run until a signal or error. Ctrl+C/SIGINT, SIGTERM and Windows Ctrl+Break request orderly shutdown. Connection/handshake deadlines are 15 seconds, the WebSocket idle timeout is 60 seconds, and network shutdown has a five-second deadline.
 
-| Option | Supported behavior |
+### Command-line options
+
+| Option | Behavior |
 | --- | --- |
 | `--help`, `-h` | Show usage. |
 | `--venue spot` | Default and only supported venue. |
-| `--symbols BTCUSDT` | Default and only supported symbol; lists/other symbols are rejected. |
-| `--output-dir PATH` | Default `./output`; create directories, refuse existing targets. |
-| `--duration SECONDS` | Positive integer; incompatible with replay. |
-| `--replay CSV` | Regenerate only the book CSV, entirely offline. |
+| `--symbols BTCUSDT` | Default and only symbol; other symbols and comma-separated lists are rejected. |
+| `--output-dir PATH` | Default `./output`; create directories and refuse existing output files. |
+| `--duration SECONDS` | Positive integer within the timer range; incompatible with replay. |
+| `--replay CSV` | Read a market audit and regenerate only its book CSV, entirely offline. |
 
-Use separate option/value arguments. Unknown/duplicate options, missing values and invalid combinations exit 2, including when supplied with `--help`. Capture failures exit 1. A requested duration/signal stop exits 0 only after all three streams, at least one book row and successful finalization of both CSVs. SIGINT/Ctrl+C, SIGTERM and Windows Ctrl+Break request orderly shutdown.
+Use separate option/value arguments. Unknown or duplicate options, missing values and invalid combinations exit **2**, including when combined with `--help`. Runtime failures exit **1**. A live run exits **0** only after a requested stop, all three streams, at least one book row and successful finalization of both files. A completed valid replay exits **0**; a header-only audit is a valid empty replay.
 
-## Input streams and output files
+### Offline replay
 
-Endpoint: `wss://stream.binance.com:9443/stream?streams=btcusdt@depth@100ms/btcusdt@depth5@100ms/btcusdt@trade`.
+Replay reads physical CSV order, retains stored timestamps and uses the same depth decoder, book policy and formatter as live capture. It makes **no network calls**, constructs no TLS session and does not sleep to reproduce arrival timing.
 
-| Stream | Audit `stream_kind` | Meaning |
+```sh
+./build-linux/binance_capture --replay samples/market_data_spot_BTCUSDT_2026-10-21.csv --output-dir ./output/sample-replay
+cmp samples/market_data_spot_BTCUSDT_2026-10-21_orderbook.csv output/sample-replay/market_data_spot_BTCUSDT_2026-10-21_orderbook.csv
+```
+
+Windows equivalent:
+
+```powershell
+.\build-windows\binance_capture.exe --replay samples/market_data_spot_BTCUSDT_2026-10-21.csv --output-dir ./output/sample-replay
+& "$capturePrefix\bin\cmake.exe" -E compare_files samples/market_data_spot_BTCUSDT_2026-10-21_orderbook.csv output/sample-replay/market_data_spot_BTCUSDT_2026-10-21_orderbook.csv
+```
+
+Each example needs a fresh output directory. Replay writes `<input-stem>_orderbook.csv` and does not rewrite the audit. It validates the exact header, quoted fields, supported metadata, minified JSON and sequence order. LF/CRLF and a final record without a newline are accepted. Malformed input exits 1 with a logical record number and may leave a valid earlier output prefix. Identical input under the same policy produces byte-identical book output.
+
+## Input streams and CSV formats
+
+Combined endpoint:
+
+```text
+wss://stream.binance.com:9443/stream?streams=btcusdt@depth@100ms/btcusdt@depth5@100ms/btcusdt@trade
+```
+
+| Subscription | Audit `stream_kind` | Use |
 | --- | --- | --- |
-| `btcusdt@depth@100ms` | `depth_diff` | Absolute price-level quantity changes, with exchange update IDs `U/u`. |
+| `btcusdt@depth@100ms` | `depth_diff` | Absolute quantity changes with exchange update IDs `U/u`. |
 | `btcusdt@depth5@100ms` | `depth5` | Replacement top-five snapshot with `lastUpdateId`. |
-| `btcusdt@trade` | `trade` | Executed trades; audited without subtracting quantities from the book. |
+| `btcusdt@trade` | `trade` | Record executions; no execution-based book update or book row. |
 
-The combined envelope is parsed once. `payload_json` stores its minified inner `data` object, preserving decimal strings and unknown fields. Supported stream identifiers and supplied symbols are checked. Every recognized market payload is audited before any book mutation, including stale/rejected depth candidates. An unrecoverable semantic error stops after its audit row.
+The combined envelope is parsed once. The audit stores its minified inner `data` object, retaining decimal strings and unknown fields. Stream identifiers and any supplied payload symbol are checked. Recognized payloads are audited before book mutation, including stale or unapplied depth candidates. Malformed envelopes cannot produce an audit row; fatal depth errors stop after their audit row.
 
-One pair is created per run, using the UTC run-start date even across midnight:
+One pair is created per run using its **UTC start date**; the same files remain open across midnight:
 
 ```text
 market_data_spot_BTCUSDT_<YYYY-MM-DD>.csv
 market_data_spot_BTCUSDT_<YYYY-MM-DD>_orderbook.csv
 ```
 
-Exact market header, **nine logical columns**:
+### Market audit: nine columns
 
 ```csv
 recv_tsec,recv_tnsec,venue,stream_kind,shard_id,conn_epoch,conn_seq,symbol,payload_json
 ```
 
-`recv_tsec` is int64 seconds and `recv_tnsec` an int32 remainder in `[0,999999999]`, taken from local wall-clock time immediately after a complete read. Physical row order is processing order, even if the clock moves backward. Duration/timeouts use a steady clock. `venue=spot`, `symbol=BTCUSDT`, shard and live epoch are 0. The checked uint64 `conn_seq` starts at 1 per connection and advances for each complete text message; a control notice can consume a number without an audit row.
+| Field | Meaning in this implementation |
+| --- | --- |
+| `recv_tsec`, `recv_tnsec` | Local wall-clock time sampled immediately after a complete read: signed int64 seconds and int32 nanosecond remainder in `[0,999999999]`. Binance `E/T` fields do not supply row timestamps. |
+| `venue`, `symbol`, `shard_id` | Fixed to `spot`, `BTCUSDT`, `0`. |
+| `stream_kind` | `depth_diff`, `depth5` or `trade`. |
+| `conn_epoch` | Connection generation; live capture uses 0 because it does not reconnect. Replay supports increasing recorded epochs. |
+| `conn_seq` | Checked uint64 message counter, starting at 1; advances for complete text messages before routing. A server control notice can consume a number without an audit row. |
+| `payload_json` | Minified inner Binance object, escaped as one CSV field. |
 
-Exact book header, **26 columns**:
+Physical row order is processing order, including equal or backward wall-clock timestamps. Duration and timeout timers use a steady clock.
+
+### Order book: 26 columns
 
 ```csv
 tsec,tnsec,seqNo,id,type,side,bid0,bid1,bid2,bid3,bid4,bid_size0,bid_size1,bid_size2,bid_size3,bid_size4,ask0,ask1,ask2,ask3,ask4,ask_size0,ask_size1,ask_size2,ask_size3,ask_size4
 ```
 
-Book time is the original triggering receive timestamp. `seqNo` is uint64, starts at 1, and increments only for emitted rows. Instrument `id=1` identifies the single supported symbol. Type `P` is an applied depth5 replacement; `D` is an applied diff. Side is `B` for bid-only diffs, `S` for ask-only diffs, and `N` for both/neither or any snapshot. Bid prices descend; ask prices ascend; quantities correspond by index.
+| Fields | Meaning |
+| --- | --- |
+| `tsec`, `tnsec` | Original receive timestamp of the triggering event. |
+| `seqNo` | Checked uint64 counter, starting at 1 and incremented once per emitted row; continues across recorded epoch changes. |
+| `id` | Stable instrument ID `1` for the sole supported symbol. |
+| `type` | `P` for an applied depth5 replacement; `D` for an applied diff. |
+| `side` | `B` for bid-only diffs, `S` for ask-only diffs, `N` for both/neither and all snapshots. Classification uses the event's supplied sides. |
+| `bid0` ... `bid4`, `bid_size0` ... `bid_size4` | Bid prices descending, with corresponding quantities. |
+| `ask0` ... `ask4`, `ask_size0` ... `ask_size4` | Ask prices ascending, with corresponding quantities. |
 
-Prices and quantities are signed int64 integers scaled by **100000000**: `"101.25"` becomes `10125000000`; `"0.003"` becomes `300000`. Conversion uses checked decimal arithmetic without `double`. Malformed syntax, overflow and nonzero precision beyond eight decimal places are rejected; additional trailing zeros are accepted. Both CSVs use UTF-8, CRLF and RFC 4180-style quoting: fields containing comma, quote, CR or LF are quoted and internal quotes doubled.
+Prices and quantities are signed **int64 integers scaled by 100000000**: `"101.25"` becomes `10125000000`; `"0.003"` becomes `300000`. Checked parsing rejects malformed syntax, overflow and nonzero precision beyond eight places. Extra trailing zeros are accepted. Short snapshots use trailing zero price/size pairs for missing slots.
 
-## Reconstruction, sequencing and limits
+Both CSVs use UTF-8, CRLF and RFC 4180-style escaping: fields containing comma, quote, CR or LF are quoted, with internal quotes doubled. Count audit columns with a CSV-aware parser; JSON commas belong to the quoted payload field.
 
-Policy `limited-top5-v2` uses descending/ascending `std::map` containers. A fresh depth5 replaces both maps. Its fifth prices establish the known ranges: bids at or above the bid floor and asks at or below the ask ceiling. Retain all known levels in those ranges, including a known sixth. Diffs replace quantities; zero deletes. Outside-range pairs are validated but not retained.
+## Order-book reconstruction
 
-For current revision `L`, a diff with `u <= L` is already covered. Otherwise it can advance when `U <= L+1 <= u`. A gap (`U > L+1`), crossed candidate or insufficient known depth clears readiness and waits for a snapshot at least as fresh as the highest observed valid depth ID. Stale snapshots cannot rewind the book. Equal-revision contradictions are fatal, including short-snapshot contradictions. No update buffering or reordering is performed.
+Policy **`limited-top5-v2`** uses descending bid and ascending ask `std::map` containers. It retains known levels beyond the exported five while they remain inside the anchor's covered price ranges.
 
-Every successfully applied depth event emits a row, even when the visible five are unchanged. Covered/stale/waiting candidates remain audit-only and are counted. Short snapshots emit their supplied levels with trailing zero price/size pairs, but do not enable diff reconstruction. An unknown sixth after deletion invalidates the view rather than being hidden by zero padding. Trades emit no book rows.
+1. **Anchor or refresh:** accept depth5 only if its revision is at least the highest valid depth ID already seen in the epoch. Replace both maps. A complete five-by-five snapshot establishes a bid floor and ask ceiling; a short snapshot emits its supplied levels but leaves diff reconstruction waiting.
+2. **Check continuity:** for committed revision `L`, a diff with `u <= L` is covered/stale. When `u > L`, apply only if `U <= L+1 <= u`. A gap (`U > L+1`) clears readiness and waits for a sufficiently fresh snapshot. Equal-revision snapshot or in-range diff contradictions are fatal.
+3. **Apply absolute quantities:** replace or insert each in-range level; zero erases it. Outside-range changes are validated but not retained. Never subtract trade quantities separately.
+4. **Check coverage:** require at least five known levels per side and best bid below best ask. A known sixth can enter the exported five. If an unknown sixth would be needed, or the candidate is crossed, clear the book and await a fresh snapshot instead of publishing incomplete state.
+5. **Emit:** every applied snapshot or diff produces one row. Covered/stale/waiting events stay audit-only. Extract the first five entries of each sorted map; no whole-book sorting is needed.
 
-The model assumes comparable snapshot/diff revisions and coherent exchange input. It is not Binance's complete REST-bootstrap procedure. Cross-stream arrival order is not guaranteed. Loss of coverage can suppress otherwise valid diffs, and covered-diff suppression remains an explicit reviewer-acceptance limitation. [The working design](docs/design.md) details the proof boundary and examples.
+A refresh discards previous deeper knowledge rather than overlaying it. No update buffering or reordering occurs. Recovery retains the highest-seen watermark so an older snapshot cannot rewind state.
 
-There is **no automatic reconnect**. Network failure stops with exit 1 and invalidates the book. In recorded replay, increasing `conn_epoch` resets levels/revisions/readiness, including when the first new-epoch event is a trade; book `seqNo` continues. Decreasing epochs and duplicate/backward `conn_seq` within an epoch fail; gaps in `conn_seq` are allowed. Exchange IDs, connection sequence, epoch and output sequence have distinct meanings.
+This is a **limited top-five reconstruction model**, distinct from Binance's full REST-snapshot/buffered-diff procedure. Comparable snapshot/diff revisions and coherent input remain integration assumptions; one combined connection does not guarantee a globally ordered bundle of streams. The model can suppress diff output while coverage is unavailable. [The working design](docs/design.md) explains that boundary and the known price ranges: bids at or above the anchor's fifth bid, asks at or below its fifth ask.
 
-Map mutation is `O(k log N)`; duplicate validation adds `O(k log k)`. This does not meet an `O(k)` asymptotic target. Limits: one symbol/shard, 1 MiB WebSocket message, 10,000 changes per side and 20,000 retained levels per side. No throughput/latency benchmark is claimed.
+For `k` changes and `N` retained levels, map work costs `O(k log(N+k))`; duplicate validation adds `O(k log k)`. Top-five extraction is `O(5)` per side. Snapshot replacement also clears the previous `N` entries, so it costs `O(N)` plus bounded five-level validation/insertion per side. Working memory is `O(N+k)`, excluding JSON/message storage. These are explicit trade-offs against the assignment's `O(updates)` preference.
 
-One thread runs the Asio event loop; decoding and buffered `FILE` writes run in order. Files flush every second and on checked final close. Slow storage delays networking/timers; there is no writer thread or crash-transaction guarantee. Handshake timeout is 15 seconds, WebSocket idle timeout 60 seconds and close deadline five seconds. Beast handles fragments and automatic pong replies. Missing TLS `close_notify` is reported only as a warning after an intentional normal WebSocket close (1000); truncated live reads remain failures.
+Bounds: 1 MiB per WebSocket message, 10,000 changes per side, 20,000 retained levels per side and 2 MiB + 4096 bytes per replay record. The retained-level limit is checked after a candidate batch; exceeding it invalidates the book and stops the run.
 
-## Replay and tests
+Network failure stops with exit 1; **automatic reconnect is not implemented**. During replay, an increased `conn_epoch` resets levels, revisions and readiness, even when its first event is a trade. Epochs cannot decrease; `conn_seq` must strictly increase within an epoch, though gaps are allowed. Exchange `U/u`, connection `conn_seq`, generation `conn_epoch` and output `seqNo` have distinct roles.
 
-Replay creates no Session, TLS context or network calls, does not sleep, and preserves stored timestamps/event order. It validates the exact audit schema and current Spot BTCUSDT/shard-0 metadata, then uses the shared decoder/book/writer. It accepts proper quoted fields, LF/CRLF and a final record without a newline; raw records are bounded to 2 MiB + 4096 bytes. Invalid input exits 1 with a logical record number and may leave a valid earlier output prefix. A header-only input is a valid empty replay. Fixed input and policy yield byte-identical output.
+## Testing and validation
 
-Linux, from the repository root:
+The verified Windows and Linux Release builds each passed **all eight CTest tests**, with no compiler warnings. Tests cover envelopes, CSV serialization, CLI handling, exact decimals, book transitions, replay validation and actual replay CLI execution. Release checks include 25 decimal cases, 120 book/pipeline checks and 115 replay/reliability checks.
 
-```sh
-./build-linux/binance_capture --replay samples/market_data_spot_BTCUSDT_2026-10-21.csv --output-dir ./output/sample-replay
-cmp samples/market_data_spot_BTCUSDT_2026-10-21_orderbook.csv output/sample-replay/market_data_spot_BTCUSDT_2026-10-21_orderbook.csv
-ctest --test-dir build-linux --output-on-failure
-```
+The independently specified [27-event regression fixture](tests/fixtures/stage4e_market.csv) produces [15 expected book rows](tests/fixtures/stage4e_expected_orderbook.csv): nine `P` and six `D`. It covers uncovered/overlapping diffs, deletion, duplicates, stale snapshots, gaps, recovery and epoch resets. This synthetic fixture is separate from the live samples.
 
-Windows uses `.\build-windows\binance_capture.exe` and a fresh `--output-dir`; `cmake -E compare_files EXPECTED ACTUAL` compares bytes. Output name is `<input-stem>_orderbook.csv`. Replay never writes another audit file or overwrites an existing book file.
+The successful **60-second Windows capture on October 21, 2026** exited 0 after 60,403 ms, including shutdown:
 
-Eight CTest tests cover envelope validation, nine-column CSV behavior, CLI validation, decimal conversion, book/pipeline transitions, replay reliability and actual CLI replay. Explicit checks remain enabled in Release: 25 decimal cases, 120 book checks and 115 replay/reliability checks. The independent 27-event fixture expects 15 rows (9 `P`, 6 `D`), exercising uncovered/overlapping diffs, deletion, duplicates, stale snapshots, gaps, recovery and epoch reset. It is synthetic test data, separate from genuine samples.
+| Result | Observed |
+| --- | ---: |
+| Market rows | 2,431: 590 diffs, 590 depth5 snapshots, 1,251 trades |
+| Book rows | 590 |
+| Fatal parse / connection / I/O / book errors | 0 / 0 / 0 / 0 |
+| TLS shutdown warnings | 1 |
+| Independent market and paired-book CSV validators | Both passed |
+| Full-capture offline replay | Byte-identical book output on Windows and Linux |
 
-For development CSV checking (the application itself requires no Python runtime):
+All 590 book rows were **`P`**: every diff followed a snapshot with the same final exchange revision and was already covered. The 443 nonempty in-range quantity comparisons agreed. Applied `D` output is demonstrated by the regression fixture, not by this capture.
+
+The shutdown warning records missing TLS `close_notify` after an intentional normal WebSocket close (1000). Only that narrow case is tolerated; truncated live reads remain failures. [Final validation](docs/stage4f-final-validation.md) records commands, hashes and the audit. Its checkpoint/publication notes describe the state at the time of validation.
+
+For a lightweight audit-schema check, with Python 3 installed:
 
 ```sh
 python3 tests/validate_market_csv.py samples/market_data_spot_BTCUSDT_2026-10-21.csv
 ```
 
-## Genuine capture and remaining limitations
+Python is used only by development validators; the application and offline replay are C++.
 
-The verified 60-second Windows run on October 21, 2026 exited 0 after 60,403 ms: **2,431 market rows** (590 diffs, 590 depth5, 1,251 trades) and **590 book rows**, zero fatal errors and one TLS shutdown warning. All 590 diffs followed snapshots with the same final revision, so output contains 590 `P` rows and no `D` rows. In-range quantities agreed in 443 nonempty comparisons. Offline replay reproduced the full book byte for byte; the fixture independently validates `D` output.
+## Sample outputs
 
-[The genuine sample pair](samples/README.md) is an unchanged contiguous two-second prefix: 225 market rows and all 20 corresponding book rows. It is deliberately labeled an excerpt, preserves every event within its interval, and can be replayed/compared using the commands above. Large captures/build products remain ignored; only the explicit sample pair and fixtures are allowed by `.gitignore`.
+| File | Data rows |
+| --- | ---: |
+| [Market audit](samples/market_data_spot_BTCUSDT_2026-10-21.csv) | 225: 20 depth5, 20 diffs, 185 trades |
+| [Corresponding order book](samples/market_data_spot_BTCUSDT_2026-10-21_orderbook.csv) | 20 |
 
-A separate 120-second attempt received about 49 seconds of events, then hit the configured 60-second idle timeout and exited 1 after 110,093 ms. The timeout policy explains the termination; the cause of missing peer traffic is unresolved. A stable 120-/300-second run is not claimed. We retained this result rather than weakening TLS, increasing timeouts blindly or claiming transport stability. Full-depth synchronization, automatic reconnect and multi-symbol/USD-M support remain absent. Windows ASan/UBSan runtimes were unavailable; sanitizer/leak freedom is not claimed.
+These are genuine, unmodified, contiguous byte prefixes of the successful capture, covering the same 1.9610324-second interval. Every event in the prefix and corresponding book row is preserved. They are excerpts, not the full minute. [Sample provenance](samples/README.md) includes timestamps and SHA-256 hashes. Use the offline replay/comparison commands above to reproduce the pair. Large captures and build products remain ignored.
 
-[Final validation](docs/stage4f-final-validation.md) records exact commands, Linux results, hashes, schema/reconciliation checks and the repository audit. Historical phase reports retain machine-local paths as evidence, not required installation locations. [Assignment requirements](docs/requirements.md) preserve the original contract and unresolved interpretations.
+## Known limitations
 
-## How to submit on GitHub
+- One Binance Spot BTCUSDT connection only; no USD-M or multiple-symbol capture.
+- Limited-range reconstruction can pause output after lost coverage. Full REST synchronization and automatic reconnect are absent.
+- A separate 120-second attempt received about 49 seconds of events, then hit the 60-second idle timeout and exited 1 after 110,093 ms. The cause of traffic silence remains unresolved; sustained 120-/300-second capture is unverified. The CLI accepts `--duration 300`.
+- File I/O shares the network event loop; buffered output is neither transactional nor guaranteed durable after a crash.
+- No verified production latency/throughput benchmark is claimed. The published validation does not establish sanitizer coverage or leak freedom.
 
-Repository: [Alokkumarsharma7379/binance-lob-capture](https://github.com/Alokkumarsharma7379/binance-lob-capture). Current reviewed checkpoint is `31165a9` on `main`. Final preparation does not commit, push, tag or publish automatically.
+## Repository and version
 
-After reviewing the pending diff and approving submission, the intended commands are:
+Repository: [Alokkumarsharma7379/binance-lob-capture](https://github.com/Alokkumarsharma7379/binance-lob-capture).
 
-```sh
-git status --short
-git add README.md .gitignore .gitattributes .vscode/c_cpp_properties.json docs/stage4f-final-validation.md samples/
-git diff --cached --check
-git diff --cached --stat
-git commit -m "Finalize validation, documentation and genuine capture samples"
-git push origin main
-git tag -a v1.0.0 -m "Submission v1.0.0"
-git push origin v1.0.0
-```
-
-Review the diff before executing these commands. Build artifacts, toolchains, large generated CSVs and credentials must remain excluded. Share the repository URL and the approved `v1.0.0` tag after successful pushes.
+Published submission: annotated tag [v1.0.0](https://github.com/Alokkumarsharma7379/binance-lob-capture/tree/v1.0.0), pointing to commit [fbf77a1](https://github.com/Alokkumarsharma7379/binance-lob-capture/commit/fbf77a15b3e2bf85c5c37e1ee93154a5e551ed93). The tag identifies the submitted implementation and recorded validation. [Assignment requirements](docs/requirements.md) preserve the original contract and documented interpretations.
