@@ -45,6 +45,7 @@ Recorded market CSV
        local book
            |
     order-book CSV
+```
 
 Trades are audited without applying execution quantities to the book. Every successfully applied depth event emits a book row, even if the visible top five is unchanged. Epoch resets also apply to recorded trade events, as described below.
 
